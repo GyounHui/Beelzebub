@@ -54,6 +54,8 @@ class EnvAuditor:
                 print(f"[ERROR] Request failed for {url_env}: {e}")
 
     def process_env(self, url: str, content: str) -> None:
+        # Always persist raw .env content when discovered so users can review unparsed data
+        self.save_results('raw_envs.txt', f"{url}/.env\n{content}\n\n")
         results = []
         env_patterns = {
             'app': {
