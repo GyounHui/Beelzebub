@@ -20,6 +20,8 @@ from lib.tools.indsf import kontolbgt
 from lib.tools.lr import urfavmine
 from lib.tools.cker import BruteForceTool
 from lib.tools.brt import wp
+from lib.tools.aws_check import aws_check
+from lib.tools.ip_generator import ip_generator_cli
 if not os.path.exists('Result'):
     os.makedirs('Result')
 
@@ -71,6 +73,10 @@ async def menu():
                 tool.cker()
             elif pilih == "15":
                 blublub()
+            elif pilih == "16":
+                aws_check()
+            elif pilih == "17":
+                ip_generator_cli()
             elif pilih == "98":
                 clear()
                 print(donate)

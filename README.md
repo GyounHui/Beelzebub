@@ -1,8 +1,6 @@
 # Beelzebub v1.6 Remaster
 
-<p align="center">
-  <img src="lib/img/beelz.png" alt="Beelzebub Logo"/>
-</p>
+<!-- banner image removed; ASCII banner is used inside the Python tool output -->
 
 A comprehensive web security and penetration testing toolkit.
 
