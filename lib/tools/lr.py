@@ -2,22 +2,42 @@
 #lukontol
 import re
 import os
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 from lib.tools.utils import banner, clear
 from lib.tools.colors import wh, r, g, res
 
 class EnvAuditor:
-    def __init__(self, timeout: int = 15):
+    def __init__(self, timeout: int = 15, max_retries: int = 3):
         self.timeout = timeout
+        self.max_retries = max_retries
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
         self.results_dir = Path('Result/env-scanner')
         self.results_dir.mkdir(exist_ok=True)
+        self.session = self._create_session()
+        self.stats = {'total': 0, 'found': 0, 'failed': 0}
+
+    def _create_session(self) -> requests.Session:
+        """Create a requests session with retry strategy and connection pooling."""
+        session = requests.Session()
+        retry_strategy = Retry(
+            total=self.max_retries,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"]
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
 
     def validate_url(self, url: str) -> Optional[str]:
         url = url.strip()
@@ -39,19 +59,50 @@ class EnvAuditor:
             if not path:
                 continue
             url_env = f"{url}/{path}"
-            try:
-                with requests.get(url_env, headers=self.headers, timeout=self.timeout) as req:
-                    if req.status_code == 200 and '.env' in path.lower():
-                        print(f"[INFO] Found .env at {url_env}")
-                        self.process_env(url, req.text)
+            
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    self.stats['total'] += 1
+                    resp = self.session.get(url_env, headers=self.headers, timeout=self.timeout)
+                    if resp.status_code == 200 and '.env' in path.lower():
+                        print(f"{wh}[{g}+{wh}] Found .env at {url_env}")
+                        self.process_env(url, resp.text)
+                        break  # Success, move to next path
+                    elif resp.status_code == 200:
+                        print(f"{wh}[{g}*{wh}] HTTP 200 at {url_env} but not .env")
+                        break
                     else:
-                        print(f"[DEBUG] No .env at {url_env} (Status: {req.status_code})")
-            except requests.ConnectionError:
-                print(f"[ERROR] Connection error for {url_env}")
-            except requests.Timeout:
-                print(f"[ERROR] Timeout for {url_env}")
-            except requests.RequestException as e:
-                print(f"[ERROR] Request failed for {url_env}: {e}")
+                        if attempt == self.max_retries:
+                            print(f"{wh}[{r}!{wh}] {url_env} (HTTP {resp.status_code}, gave up after {self.max_retries} retries)")
+                        break
+                except requests.Timeout:
+                    if attempt == self.max_retries:
+                        print(f"{wh}[{r}!{wh}] Timeout: {url_env} (after {self.max_retries} retries)")
+                        self.stats['failed'] += 1
+                    else:
+                        wait_time = 0.5 * (2 ** (attempt - 1))
+                        print(f"{wh}[{g}~{wh}] Timeout {url_env}, retry {attempt}/{self.max_retries} in {wait_time:.1f}s...")
+                        time.sleep(wait_time)
+                except requests.ConnectionError:
+                    if attempt == self.max_retries:
+                        print(f"{wh}[{r}!{wh}] Connection error: {url_env} (after {self.max_retries} retries)")
+                        self.stats['failed'] += 1
+                    else:
+                        wait_time = 0.5 * (2 ** (attempt - 1))
+                        print(f"{wh}[{g}~{wh}] Connection error {url_env}, retry {attempt}/{self.max_retries} in {wait_time:.1f}s...")
+                        time.sleep(wait_time)
+                except requests.RequestException as e:
+                    if attempt == self.max_retries:
+                        print(f"{wh}[{r}!{wh}] Request failed: {url_env} ({type(e).__name__})")
+                        self.stats['failed'] += 1
+                    else:
+                        wait_time = 0.5 * (2 ** (attempt - 1))
+                        print(f"{wh}[{g}~{wh}] Request error {url_env}, retry {attempt}/{self.max_retries} in {wait_time:.1f}s...")
+                        time.sleep(wait_time)
+                except Exception as e:
+                    print(f"{wh}[{r}!{wh}] Unexpected error: {url_env} ({type(e).__name__}: {str(e)[:50]})")
+                    self.stats['failed'] += 1
+                    break
 
     def process_env(self, url: str, content: str) -> None:
         # Always persist raw .env content when discovered so users can review unparsed data
@@ -960,14 +1011,21 @@ class EnvAuditor:
     def audit(self, url: str, paths: List[str]) -> None:
         validated_url = self.validate_url(url)
         if not validated_url:
-            print(f"[ERROR] Invalid URL: {url}")
+            print(f"{wh}[{r}!{wh}] Invalid URL: {url}")
+            self.stats['failed'] += 1
             return
-        print(f"[INFO] Auditing {validated_url}")
+        print(f"{wh}[{g}→{wh}] Auditing {validated_url}")
         self.check_env_paths(validated_url, paths)
 
     def run(self, urls: List[str], paths: List[str], max_workers: int = 5) -> None:
+        print(f"{wh}[{g}!{wh}] Starting audit of {len(urls)} URLs with {max_workers} workers...")
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             executor.map(lambda url: self.audit(url, paths), urls)
+        
+        print(f"\n{wh}[{g}✓{wh}] Audit complete:")
+        print(f"  Total requests: {self.stats['total']}")
+        print(f"  Failed: {self.stats['failed']}")
+        print(f"  Results saved to: {self.results_dir}{res}")
 
 
 def load_paths(file_path: str) -> List[str]:
@@ -985,7 +1043,7 @@ def load_paths(file_path: str) -> List[str]:
 def urfavmine():
     clear()
     print(banner)
-    print(f"{wh}[{g}+{wh}] Using Tools env scanner \n{wh}[{g}+{wh}] result save in Result/env-scanner \n\n{res}")
+    print(f"{wh}[{g}+{wh}] Enhanced env scanner with retry logic and resilience\n{wh}[{g}+{wh}] Results saved in Result/env-scanner\n\n{res}")
     try:
         urls_file = input(f"{wh}[{g}+{res}]{wh} Enter URLs list file: ").strip()
         if not Path(urls_file).is_file():
@@ -996,12 +1054,12 @@ def urfavmine():
             urls = [line.strip() for line in f if line.strip()]
         
         if not urls:
-            print("{wh}[{r}!{res}]{wh} No URLs found in the file")
+            print(f"{wh}[{r}!{res}]{wh} No URLs found in the file")
             return
 
         paths = load_paths('lib/files/env.txt')
         if not paths:
-            print(f"{wh}[{r}!{res}]{wh} No paths loaded. Ensure path.txt exists.")
+            print(f"{wh}[{r}!{res}]{wh} No paths loaded. Ensure env.txt exists.")
             return
 
         threads = input(f"{wh}[{g}+{res}]{wh} Enter number of threads (default 5): ").strip()
@@ -1013,9 +1071,21 @@ def urfavmine():
             print(f"{wh}[{r}!{res}]{wh} Invalid threads value: {e}")
             return
 
-        auditor = EnvAuditor()
+        timeout = input(f"{wh}[{g}+{res}]{wh} Enter timeout per URL in seconds (default 15): ").strip()
+        try:
+            timeout = int(timeout) if timeout else 15
+        except ValueError:
+            timeout = 15
+
+        retries = input(f"{wh}[{g}+{res}]{wh} Enter max retries per failed connection (default 3): ").strip()
+        try:
+            max_retries = int(retries) if retries else 3
+        except ValueError:
+            max_retries = 3
+
+        auditor = EnvAuditor(timeout=timeout, max_retries=max_retries)
         auditor.run(urls, paths, max_workers)
-        print(f"{wh}[{r}+{res}]{wh} Task completed")
+        print(f"{wh}[{g}+{res}]{wh} Task completed")
 
     except KeyboardInterrupt:
         print(f"{wh}[{r}!{res}]{wh} Audit interrupted by user")
