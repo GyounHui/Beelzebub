@@ -105,8 +105,6 @@ class EnvAuditor:
                     break
 
     def process_env(self, url: str, content: str) -> None:
-        # Always persist raw .env content when discovered so users can review unparsed data
-        self.save_results('raw_envs.txt', f"{url}/.env\n{content}\n\n")
         results = []
         env_patterns = {
             'app': {
@@ -995,13 +993,12 @@ class EnvAuditor:
                 matches = [m.group(0).strip() for m in matches if m and '=""' not in m.group(0)]
                 if matches and (not config['must_have'] or any(config['must_have'] in m for m in matches)):
                     results.append(config_type)
-                    self.save_results(config['filename'], f"{url}\n" + "\n".join(matches) + "\n\n")
+                    self.save_results(config['filename'], f"{url}\n" + "\n".join(matches) + "\n" + "-" * 60 + "\n\n")
 
         if results:
-            self.save_results('env.txt', f"{url}/.env\n")
-            print(f"[INFO] {url}: Found [{', '.join(results)}]")
+            print(f"{wh}[{g}+{wh}] {url}: Found [{', '.join(results)}]")
         else:
-            print(f"[WARNING] {url}: No valid .env data found")
+            print(f"{wh}[{g}~{wh}] {url}: No matching credentials found")
 
     def save_results(self, filename: str, content: str) -> None:
         file_path = self.results_dir / filename
